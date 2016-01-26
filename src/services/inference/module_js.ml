@@ -204,11 +204,11 @@ let get_package_keys filename ast =
   | _ -> assert_false (spf "Expected %s to have an object literal" filename)
   in
   let extract_property map = function
-    | Property(_, {
+    | (Property(_, {
         Property.key = Property.Literal(_, {Literal.raw; _;});
         value;
         _;
-      }) -> SMap.add raw value map
+      }), _annot) -> SMap.add raw value map
     | _ -> SMap.empty
   in
   List.fold_left extract_property SMap.empty properties

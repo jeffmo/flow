@@ -566,7 +566,7 @@ and Expression : sig
       | Property of Property.t
       | SpreadProperty of SpreadProperty.t
     type t = {
-      properties: property list;
+      properties: (property * Type.annotation option) list;
     }
   end
   module Function : sig
@@ -908,7 +908,7 @@ and Pattern : sig
       | Property of Property.t
       | SpreadProperty of SpreadProperty.t
     type t = {
-      properties: property list;
+      properties: (property * Type.annotation option) list;
       typeAnnotation: Type.annotation option;
     }
   end

@@ -16,6 +16,8 @@ module Error = Parse_error
 module SSet = Set.Make(String)
 module SMap = Map.Make(String)
 
+let print_endlinef fmt = Printf.ksprintf print_endline fmt
+
 let is_future_reserved = function
   | "enum" -> true
   | _ -> false
@@ -800,12 +802,12 @@ end = struct
           o.Pattern.Object.properties
 
       and object_property check_env = Pattern.Object.(function
-        | Property (_, property) -> Property.(
+        | (Property (_, property), _annotJEFF) -> Property.(
             let check_env = match property.key with
             | Identifier id -> identifier_no_dupe_check check_env id
             | _ -> check_env in
             pattern check_env property.pattern)
-        | SpreadProperty (_, { SpreadProperty.argument; }) ->
+        | (SpreadProperty (_, { SpreadProperty.argument; }), _annotJEFF) ->
             pattern check_env argument)
 
       and _array check_env arr =
@@ -2058,32 +2060,41 @@ end = struct
         then begin
           (* Spread property *)
           Expect.token env T_ELLIPSIS;
+          let expect_lval_annot = Expect.maybe env T_LPAREN in
           let argument = Parse.assignment env in
-          SpreadProperty (Loc.btwn start_loc (fst argument), SpreadProperty.({
+
+          let lval_annot =
+            if not expect_lval_annot
+            then None
+            else Some (Type.annotation env)
+          in
+
+          (SpreadProperty (Loc.btwn start_loc (fst argument), SpreadProperty.({
             argument;
-          }))
+          })), lval_annot) (* JEFF *)
         end else begin
           (* look for a following identifier to tell whether to parse a function
            * or not *)
+          let expect_lval_annot = Expect.maybe env T_LPAREN in
           let async = Peek.identifier ~i:1 env && Declaration.async env in
-          Property (match async , Declaration.generator env async, key env with
+          (*(Property*) (match async , Declaration.generator env async, key env with
           | false, false, (_, (Property.Identifier (_, { Ast.Identifier.name =
               "get"; _}) as key)) ->
               (match Peek.token env with
               | T_COLON
               | T_LESS_THAN
-              | T_LPAREN -> init env start_loc key false false
-              | _ -> get env start_loc)
+              | T_LPAREN -> init ~expect_lval_annot env start_loc key false false
+              | _ -> Property (get env start_loc), None (* JEFF *))
           | false, false, (_, (Property.Identifier (_, { Ast.Identifier.name =
               "set"; _}) as key)) ->
               (match Peek.token env with
               | T_COLON
               | T_LESS_THAN
-              | T_LPAREN -> init env start_loc key false false
-              | _ -> set env start_loc)
+              | T_LPAREN -> init ~expect_lval_annot env start_loc key false false
+              | _ -> Property (set env start_loc), None (* JEFF *))
           | async, generator, (_, key) ->
-              init env start_loc key async generator
-          )
+              init ~expect_lval_annot env start_loc key async generator
+          )(*, None (* JEFF *) ) *)
         end
       )
 
@@ -2111,16 +2122,30 @@ end = struct
           shorthand = false;
         })
 
-      and init env start_loc key async generator =
+      and init ~expect_lval_annot env start_loc key async generator =
         Ast.Expression.Object.Property.(
-          let value, shorthand, _method =
+          let value, shorthand, _method, lval_annot =
             match Peek.token env with
+            | T_COLON when expect_lval_annot ->
+                let annot = Some (Type.annotation env) in
+                Expect.token env T_RPAREN;
+                let res =
+                  init ~expect_lval_annot:false env start_loc key async generator
+                in
+                (match res with
+                | (Ast.Expression.Object.Property (_, {
+                    value;
+                    shorthand;
+                    _method;
+                    _;
+                  }), _) -> (value, shorthand, _method, annot)
+                | _ -> failwith "NOPE.")
             | T_RCURLY
             | T_COMMA ->
                 (match key with
                 | Literal lit -> fst lit, Ast.Expression.Literal (snd lit)
                 | Identifier id -> fst id, Ast.Expression.Identifier id
-                | Computed expr -> expr), true, false
+                | Computed expr -> expr), true, false, None
             | T_LESS_THAN
             | T_LPAREN ->
                 let typeParameters = Type.type_parameter_declaration env in
@@ -2146,20 +2171,21 @@ end = struct
                   returnType;
                   typeParameters;
                 })) in
-                value, false, true
+                value, false, true, None
             | _ ->
               Expect.token env T_COLON;
-              Parse.assignment env, false, false in
-          Loc.btwn start_loc (fst value), {
+              Parse.assignment env, false, false, None
+          in
+          (Ast.Expression.Object.Property (Loc.btwn start_loc (fst value), {
             key;
             value;
             kind = Init;
             _method;
             shorthand;
-          }
+          }), lval_annot)
         )
 
-      and check_property env prop_map prop = Ast.Expression.Object.(
+      and check_property env prop_map (prop, _annotJEFF) = Ast.Expression.Object.(
         match prop with
         | Property (prop_loc, ({ Property.key = Property.Literal _ | Property.Identifier _; _ } as prop)) ->
             Property.(
@@ -3571,21 +3597,21 @@ end = struct
     let _object =
       let property env prop =
         Ast.Expression.Object.(match prop with
-        | Property (loc, { Property.key; value; _ }) ->
+        | (Property (loc, { Property.key; value; _ }), annot) ->
           let key = Property.(match key with
           | Literal lit -> Pattern.Object.Property.Literal lit
           | Identifier id -> Pattern.Object.Property.Identifier id
           | Computed expr -> Pattern.Object.Property.Computed expr) in
           let pattern = Parse.pattern env value in
-          Pattern.(Object.Property (loc, Object.Property.({
+          (Pattern.(Object.Property (loc, Object.Property.({
             key;
             pattern;
-          })))
-        | SpreadProperty (loc, { SpreadProperty.argument; }) ->
+          }))), annot)
+        | (SpreadProperty (loc, { SpreadProperty.argument; }), annot) ->
             let argument = Parse.pattern env argument in
-            Pattern.(Object.SpreadProperty (loc, Object.SpreadProperty.({
+            (Pattern.(Object.SpreadProperty (loc, Object.SpreadProperty.({
               argument;
-            }))))
+            })))), annot)
 
       in fun ?(with_type=false) env (loc, obj) ->
         let properties =

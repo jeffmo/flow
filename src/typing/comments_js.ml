@@ -240,16 +240,16 @@ and meta_fbody cmap loc params body =
 and meta_expression cmap = Ast.Expression.(function
   | _, Object { Object.properties } ->
       concat_fold (fun cmap -> function
-        | Object.Property (loc, {
+        | (Object.Property (loc, {
             Object.Property.value = (_, Function {
               Function.params; body; _
             });
             key = Ast.Expression.Object.Property.Identifier _;
             _
-          }) ->
+          }), _annotJEFF) ->
             meta_fbody cmap loc params body
 
-        | Object.Property (_, { Object.Property.value = v ; _ }) ->
+        | (Object.Property (_, { Object.Property.value = v ; _ }), _annotJEFF) ->
             meta_expression cmap v
 
         | _ -> cmap, [] (* TODO? *)

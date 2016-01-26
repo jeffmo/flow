@@ -220,11 +220,11 @@ let rec extract_destructured_bindings accum pattern = Ast.Pattern.(
   | Expression(_) ->
     failwith "Parser Error: Expression patterns don't exist in JS."
 ) and extract_obj_prop_pattern_bindings accum = Ast.Pattern.(function
-  | Object.Property(_, prop) ->
+  | (Object.Property(_, prop), _annotJEFF) ->
     let (_, rhs_pattern) = prop.Object.Property.pattern in
     extract_destructured_bindings accum rhs_pattern
 
-  | Object.SpreadProperty(_) ->
+  | (Object.SpreadProperty(_), _annotJEFF) ->
     failwith "Unsupported: Destructuring object spread properties"
 ) and extract_arr_elem_pattern_bindings accum = Ast.Pattern.(function
   | Some(Array.Element(_, pattern)) ->
@@ -291,7 +291,7 @@ let rec destructuring ?(parent_pattern_t=None) cx curr_t expr f = Ast.Pattern.(f
   | _, Object { Object.properties; _; } -> Object.(
       let xs = ref [] in
       properties |> List.iter (function
-        | Property (loc, prop) ->
+        | (Property (loc, prop), _annotJEFF) ->
             begin match prop with
             | { Property.key = Property.Identifier (loc, id); pattern = p; } ->
                 let x = id.Ast.Identifier.name in
@@ -320,7 +320,7 @@ let rec destructuring ?(parent_pattern_t=None) cx curr_t expr f = Ast.Pattern.(f
               error_destructuring cx loc
             end
 
-        | SpreadProperty (loc, { SpreadProperty.argument }) ->
+        | (SpreadProperty (loc, { SpreadProperty.argument }), _annotJEFF) ->
             let reason = mk_reason "object pattern spread property" loc in
             let tvar = DestructuringT (reason, curr_t, ObjRest !xs) in
             destructuring ~parent_pattern_t:(Some curr_t) cx tvar expr f argument
@@ -3034,11 +3034,11 @@ and export_statement cx _type_params_map loc
 
 and object_prop cx type_params_map map = Ast.Expression.Object.(function
   (* name = function expr *)
-  | Property (_, { Property.kind = Property.Init;
+  | (Property (_, { Property.kind = Property.Init;
                      key = Property.Identifier (_, {
                        Ast.Identifier.name; _ });
                      value = (vloc, Ast.Expression.Function func);
-                     _ }) ->
+                     _ }), _annotJEFF) ->
       Ast.Expression.Function.(
         let { params; defaults; rest; body;
               returnType; typeParameters; id; async; generator; _ } = func
@@ -3054,7 +3054,7 @@ and object_prop cx type_params_map map = Ast.Expression.Object.(function
       )
 
   (* name = non-function expr *)
-  | Property (_, { Property.kind = Property.Init;
+  | (Property (_, { Property.kind = Property.Init;
       key =
         Property.Identifier (_, { Ast.Identifier.name; _ }) |
         Property.Literal (_, {
@@ -3062,12 +3062,12 @@ and object_prop cx type_params_map map = Ast.Expression.Object.(function
           _;
         });
                    value = v;
-                   _ }) ->
+                   _ }), _annotJEFF) ->
     let t = expression cx type_params_map v in
     SMap.add name t map
 
   (* literal LHS *)
-  | Property (loc, { Property.key = Property.Literal _; _ }) ->
+  | (Property (loc, { Property.key = Property.Literal _; _ }), _annotJEFF) ->
     let msg = "non-string literal property keys not supported" in
     Flow_js.add_error cx [mk_reason "" loc, msg];
     map
@@ -3086,11 +3086,11 @@ and object_prop cx type_params_map map = Ast.Expression.Object.(function
    *)
 
   (* unsafe getter property *)
-  | Property (_, {
+  | (Property (_, {
       Property.kind = Property.Get;
       key = Property.Identifier (_, { Ast.Identifier.name; _ });
       value = (vloc, Ast.Expression.Function func);
-      _ })
+      _ }), _annotJEFF)
     when are_getters_and_setters_enabled () ->
     Ast.Expression.Function.(
       let { body; returnType; _ } = func in
@@ -3111,11 +3111,11 @@ and object_prop cx type_params_map map = Ast.Expression.Object.(function
     )
 
   (* unsafe setter property *)
-  | Property (_, {
+  | (Property (_, {
     Property.kind = Property.Set;
       key = Property.Identifier (_, { Ast.Identifier.name; _ });
       value = (vloc, Ast.Expression.Function func);
-      _ })
+      _ }), _annotJEFF)
     when are_getters_and_setters_enabled () ->
     Ast.Expression.Function.(
       let { params; defaults; body; returnType; _ } = func in
@@ -3135,17 +3135,17 @@ and object_prop cx type_params_map map = Ast.Expression.Object.(function
       map
     )
 
-  | Property (loc, { Property.kind = Property.Get | Property.Set; _ }) ->
+  | (Property (loc, { Property.kind = Property.Get | Property.Set; _ }), _annotJEFF) ->
     let msg = "get/set properties not yet supported" in
     Flow_js.add_error cx [mk_reason "" loc, msg];
     map
 
   (* computed LHS *)
-  | Property (_, { Property.key = Property.Computed _; _ }) ->
+  | (Property (_, { Property.key = Property.Computed _; _ }), _annotJEFF) ->
     map
 
   (* spread prop *)
-  | SpreadProperty _ ->
+  | (SpreadProperty _, _annotJEFF) ->
     map
 )
 
@@ -3189,12 +3189,12 @@ and object_ cx type_params_map reason ?(allow_sealed=true) props =
 
   let sealed, map, result = List.fold_left (fun (sealed, map, result) t ->
     match t with
-    | SpreadProperty (_, { SpreadProperty.argument }) ->
+    | (SpreadProperty (_, { SpreadProperty.argument }), _annotJEFF) ->
         let spread = expression cx type_params_map argument in
         let obj = eval_object (map, result) in
         let result = mk_spread spread obj in
         false, SMap.empty, Some result
-    | Property (_, { Property.key = Property.Computed k; value = v; _ }) ->
+    | (Property (_, { Property.key = Property.Computed k; value = v; _ }), _annotJEFF) ->
         let k = expression cx type_params_map k in
         let v = expression cx type_params_map v in
         let obj = eval_object (map, result) in
@@ -4669,7 +4669,7 @@ and mk_proptypes cx type_params_map props = Ast.Expression.Object.(
   List.fold_left (fun (amap, omap, dict) -> function
 
     (* required prop *)
-    | Property (_, { Property.
+    | (Property (_, { Property.
         kind = Property.Init;
         key = Property.Identifier (_, {
           Ast.Identifier.name; _ });
@@ -4680,14 +4680,14 @@ and mk_proptypes cx type_params_map props = Ast.Expression.Object.(
           _object = e;
           _
         });
-        _ }) ->
+        _ }), _annotJEFF) ->
         let tvar = mk_proptype cx type_params_map e in
         SMap.add name tvar amap,
         omap,
         dict
 
     (* other prop *)
-    | Property (_, { Property.kind = Property.Init;
+    | (Property (_, { Property.kind = Property.Init;
         key =
           Property.Identifier (_, { Ast.Identifier.name; _ }) |
           Property.Literal (_, {
@@ -4695,14 +4695,14 @@ and mk_proptypes cx type_params_map props = Ast.Expression.Object.(
             _;
           });
         value = v;
-        _ }) ->
+        _ }), _annotJEFF) ->
         let tvar = mk_proptype cx type_params_map v in
         amap,
         SMap.add name tvar omap,
         dict
 
     (* spread prop *)
-    | SpreadProperty _ ->
+    | (SpreadProperty _, _annotJEFF) ->
       (* Instead of modeling the spread precisely, we instead make the propTypes
          extensible. This has the effect of loosening the check for properties
          added by the spread, while leaving the checking of other properties as
@@ -4713,20 +4713,20 @@ and mk_proptypes cx type_params_map props = Ast.Expression.Object.(
       amap, omap, Some { dict_name=None; key=StrT.t; value=AnyT.t; }
 
     (* literal LHS *)
-    | Property (loc, { Property.key = Property.Literal _; _ }) ->
+    | (Property (loc, { Property.key = Property.Literal _; _ }), _annotJEFF) ->
       let msg =
         "non-string literal property keys not supported for React propTypes" in
       Flow_js.add_error cx [mk_reason "" loc, msg];
       amap, omap, dict
 
     (* get/set kind *)
-    | Property (loc, { Property.kind = Property.Get | Property.Set; _ }) ->
+    | (Property (loc, { Property.kind = Property.Get | Property.Set; _ }), _annotJEFF) ->
       let msg = "get/set properties not supported for React propTypes" in
       Flow_js.add_error cx [mk_reason "" loc, msg];
       amap, omap, dict
 
     (* computed LHS *)
-    | Property (loc, { Property.key = Property.Computed _; _ }) ->
+    | (Property (loc, { Property.key = Property.Computed _; _ }), _annotJEFF) ->
       let msg = "computed property keys not supported for React propTypes" in
       Flow_js.add_error cx [mk_reason "" loc, msg];
       amap, omap, dict
@@ -4754,30 +4754,30 @@ and react_create_class cx type_params_map loc class_props = Ast.Expression.(
     List.fold_left Ast.Expression.Object.(fun (fmap, mmap) -> function
 
       (* mixins *)
-      | Property (_, { Property.kind = Property.Init;
+      | (Property (_, { Property.kind = Property.Init;
           key =
             Property.Identifier (_, { Ast.Identifier.name = "mixins"; _ });
           value = aloc, Array { Array.elements };
-          _ }) ->
+          _ }), _annotJEFF) ->
         mixins := List.map (array_element cx type_params_map aloc) elements;
         fmap, mmap
 
       (* statics *)
-      | Property (_, { Property.kind = Property.Init;
+      | (Property (_, { Property.kind = Property.Init;
             key = Property.Identifier (nloc, {
             Ast.Identifier.name = "statics"; _ });
           value = _, Object { Object.properties };
-          _ }) ->
+          _ }), _annotJEFF) ->
         let reason = mk_reason "statics" nloc in
         static := object_ cx type_params_map reason ~allow_sealed:false properties;
         fmap, mmap
 
       (* propTypes *)
-      | Property (_, { Property.kind = Property.Init;
+      | (Property (_, { Property.kind = Property.Init;
           key = Property.Identifier (nloc, {
             Ast.Identifier.name = "propTypes"; _ });
           value = _, Object { Object.properties } as value;
-          _ }) ->
+          _ }), _annotJEFF) ->
         ignore (expression cx type_params_map value);
         let reason = mk_reason "propTypes" nloc in
         let amap, omap, dict = mk_proptypes cx type_params_map properties in
@@ -4789,11 +4789,11 @@ and react_create_class cx type_params_map loc class_props = Ast.Expression.(
         fmap, mmap
 
       (* getDefaultProps *)
-      | Property (_, { Property.kind = Property.Init;
+      | (Property (_, { Property.kind = Property.Init;
           key = Property.Identifier (_, {
             Ast.Identifier.name = "getDefaultProps"; _ });
           value = (vloc, Ast.Expression.Function func);
-          _ }) ->
+          _ }), _annotJEFF) ->
         Ast.Expression.Function.(
           let { params; defaults; rest; body; returnType; _ } = func in
           let reason = mk_reason "defaultProps" vloc in
@@ -4818,11 +4818,11 @@ and react_create_class cx type_params_map loc class_props = Ast.Expression.(
         )
 
       (* getInitialState *)
-      | Property (_, { Property.kind = Property.Init;
+      | (Property (_, { Property.kind = Property.Init;
           key = Property.Identifier (_, {
             Ast.Identifier.name = "getInitialState"; _ });
           value = (vloc, Ast.Expression.Function func);
-          _ }) ->
+          _ }), _annotJEFF) ->
         Ast.Expression.Function.(
           let { params; defaults; rest; body; returnType; _ } = func in
           let reason = mk_reason "initial state of React component" vloc in
@@ -4850,11 +4850,11 @@ and react_create_class cx type_params_map loc class_props = Ast.Expression.(
         )
 
       (* name = function expr *)
-      | Property (_, { Property.kind = Property.Init;
+      | (Property (_, { Property.kind = Property.Init;
           key = Property.Identifier (_, {
             Ast.Identifier.name; _ });
           value = (vloc, Ast.Expression.Function func);
-          _ }) ->
+          _ }), _annotJEFF) ->
         Ast.Expression.Function.(
           let { params; defaults; rest; body;
             returnType; async; generator; _ } = func
@@ -4868,14 +4868,14 @@ and react_create_class cx type_params_map loc class_props = Ast.Expression.(
         )
 
       (* name = non-function expr *)
-      | Property (_, { Property.kind = Property.Init;
+      | (Property (_, { Property.kind = Property.Init;
           key =
             Property.Identifier (_, { Ast.Identifier.name; _ }) |
             Property.Literal (_, {
               Ast.Literal.value = Ast.Literal.String name; _;
             });
           value = v;
-          _ }) ->
+          _ }), _annotJEFF) ->
         let t = expression cx type_params_map v in
         SMap.add name t fmap, mmap
 

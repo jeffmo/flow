@@ -721,7 +721,7 @@ end with type t = Impl.t) = struct
   )
 
   and object_property = Expression.Object.(function
-    | Property (loc, prop) -> Property.(
+    | (Property (loc, prop), annot) -> Property.(
       (* This is a slight deviation from the Mozilla spec. In the spec, an object
         * property is not a proper node, and lacks a location and a "type" field.
         * Esprima promotes it to a proper node and that is useful, so I'm
@@ -742,16 +742,18 @@ end with type t = Impl.t) = struct
         "method", bool prop._method;
         "shorthand", bool prop.shorthand;
         "computed", bool computed;
+        "typeAnnotation", option type_annotation annot;
       |]
     )
-  | SpreadProperty(loc, prop) -> SpreadProperty.(
-    node "SpreadProperty" loc [|
-      "argument", expression prop.argument;
-    |]
+    | (SpreadProperty(loc, prop), annot) -> SpreadProperty.(
+      node "SpreadProperty" loc [|
+        "argument", expression prop.argument;
+        "typeAnnotation", option type_annotation annot;
+      |]
   ))
 
   and object_pattern_property = Pattern.Object.(function
-    | Property (loc, prop) -> Property.(
+    | (Property (loc, prop), annot) -> Property.(
       let key, computed = (match prop.key with
       | Literal lit -> literal lit, false
       | Identifier id -> identifier id, false
@@ -760,11 +762,13 @@ end with type t = Impl.t) = struct
         "key", key;
         "pattern", pattern prop.pattern;
         "computed", bool computed;
+        "typeAnnotation", option type_annotation annot;
       |]
     )
-    | SpreadProperty (loc, prop) -> SpreadProperty.(
+    | (SpreadProperty (loc, prop), annot) -> SpreadProperty.(
       node "SpreadPropertyPattern" loc [|
         "argument", pattern prop.argument;
+        "typeAnnotation", option type_annotation annot;
       |]
     )
   )
