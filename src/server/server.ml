@@ -355,12 +355,12 @@ module FlowProgram : Server.SERVER_PROGRAM = struct
         | Some e -> Utils_js.Err e
         | None -> (
           try
-            (if List.length flow_file_cxs > 0 then
+            (if List.length flow_file_cxs > 0 then (
               try Merge_service.merge_strict_context ~options cache flow_file_cxs
               with exn -> failwith (
                 spf "Error merging contexts: %s" (Printexc.to_string exn)
               )
-            );
+            ));
 
             (* Non-@flow files *)
             let result_contents = non_flow_files |> List.map (fun file ->
@@ -370,10 +370,10 @@ module FlowProgram : Server.SERVER_PROGRAM = struct
             (* Codegen @flow files *)
             let result_contents = List.fold_left2 (fun results file cx ->
               let file_path = Loc.string_of_filename file in
-              try
+              try (
                 let code = FlowFileGen.flow_file cx in
                 (file_path, ServerProt.GenFlowFile_FlowFile code)::results
-              with exn ->
+              ) with exn ->
                 failwith (spf "%s: %s" file_path (Printexc.to_string exn))
             ) result_contents flow_files flow_file_cxs in
 

@@ -4,6 +4,7 @@
 import {suite, test} from '../../tsrc/test/Tester';
 
 export default suite(({addFile, addFiles, flowCmd}) => [
+  /*
   test('named class exports', [
     addFile('named_class_exports.js'),
     flowCmd(['gen-flow-files', 'named_class_exports.js']).stdout(`
@@ -191,10 +192,10 @@ export default suite(({addFile, addFiles, flowCmd}) => [
     `)
   ]),
 
-  /**
-   * TODO: Add checks that assert that the following files actually get written
-   *       to disk.
-   */
+  //
+  // TODO: Add checks that assert that the following files actually get written
+  //       to disk.
+  //
 
   test('single file with --out-dir', [
     addFiles(
@@ -278,4 +279,20 @@ export default suite(({addFile, addFiles, flowCmd}) => [
       test_project/src/main.js -> test_project/dist/main.js.flow
     `),
   ]),
+  /**/
+
+  test('recursive type alias exports', [
+    addFile('recursive_type_exports.js'),
+    flowCmd(['gen-flow-files', 'recursive_type_exports.js']).stderr('').stdout(`
+      // @flow
+      type T0 = {e: TRec1};
+      export type TRec1 = {a: TRec1};
+      export type TRec2 = {b: TRec3};
+      export type TRec3 = {c: TRec2};
+      export type TRec4 = {d: T0};
+      export type TRec6<T> = {f: T, g: T0};
+      export type TRec7 = TRec6<number>;
+      declare module.exports: {};
+    `),
+ ]),
 ]);

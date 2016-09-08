@@ -8,7 +8,11 @@
  *
  *)
 
+open Utils_js
+
 module Ast = Spider_monkey_ast
+module TypeMap = Type.TypeMap
+module TypeSet = Type.TypeSet
 
 let spf = Printf.sprintf
 
@@ -29,7 +33,7 @@ let exports_map cx module_name =
 let rec mark_declared_classes name t env = Codegen.(Type.(
   match resolve_type t env with
   | ThisClassT (InstanceT (_, _, _, {class_id; _;})) ->
-    set_class_name class_id name env
+    add_class_name class_id name env
   | PolyT (_, t) ->
     mark_declared_classes name t env
   | _ ->
@@ -202,7 +206,7 @@ let gen_class_body =
 )
 
 class unexported_class_visitor = object(self)
-  inherit [Codegen.codegen_env * Type.TypeSet.t * ISet.t] Type_visitor.t as super
+  inherit [Codegen.t * TypeSet.t * ISet.t] Type_visitor.t as super
 
   method! tvar cx (env, seen, imported_classids) r id =
     let t = Codegen.resolve_type (Type.OpenT (r, id)) env in
@@ -229,7 +233,7 @@ class unexported_class_visitor = object(self)
          * Add to the list of declared classes *FIRST* to prevent inifite loops
          * on recursive references to this class from within itself.
          *)
-        let env = set_class_name class_id class_name env in
+        let env = add_class_name class_id class_name env in
         let (env, seen, imported_classids) = super#type_ cx (env, seen, imported_classids) t in
 
         let env = add_str "declare class " env |> add_str class_name in
@@ -259,13 +263,13 @@ class unexported_class_visitor = object(self)
   ))
 end
 
-let gen_local_classes =
+let _gen_local_classes =
   let visitor = new unexported_class_visitor in
   let gen_unexported_classes imported_classids _name t env =
     let (env, _, _) =
       visitor#type_
         env.Codegen.flow_cx
-        (env, Type.TypeSet.empty, imported_classids)
+        (env, TypeSet.empty, imported_classids)
         t
     in
     env
@@ -298,10 +302,124 @@ let gen_local_classes =
     in
     SMap.fold (gen_unexported_classes imported_classids) all_exports env
 
+let gen_local_types =
+  let visitor = new unexported_class_visitor in
+  let gen_unexported_classes imported_classids t _name env =
+    let (env, _, _) =
+      visitor#type_
+        env.Codegen.flow_cx
+        (env, TypeSet.empty, imported_classids)
+        t
+    in
+    env
+  in
+
+  (fun named_exports cjs_export env ->
+    let (imported_ts, env) = gen_imports env in
+
+    (* Find and mark all the declared *exported* classes first *)
+    let env = SMap.fold mark_declared_classes named_exports env in
+
+    let (all_exports, exported_types) =
+      SMap.fold
+        (fun name t (all_exports, exported_types) ->
+          let all_exports =
+            TypeMap.add (Codegen.resolve_type t env) name all_exports
+          in
+          let exported_types =
+            match t with
+            | Type.TypeT (_, t) ->
+              TypeMap.add (Codegen.resolve_type t env) name exported_types
+            | Type.PolyT (_, inner_t) ->
+              let inner_t = Codegen.resolve_type inner_t env in
+              (match inner_t with
+                | Type.TypeT _ ->
+                  print_endlinef "Found PolyT<TypeT>, adding to list of exported types";
+                  TypeMap.add (Codegen.resolve_type t env) name exported_types
+                | t ->
+                  print_endlinef "Found PolyT<%s>, skipping in exported_types!" (Type.string_of_ctor t);
+                  exported_types
+              )
+            | _ ->
+              exported_types
+          in
+          (all_exports, exported_types)
+        )
+        named_exports
+        (match cjs_export with
+          | None -> (TypeMap.empty, TypeMap.empty)
+          | Some t ->
+            (TypeMap.singleton (Codegen.resolve_type t env) "*CJS*", TypeMap.empty)
+        )
+    in
+
+    (**
+     * Find and mark all recursive types since they need to be assigned a name for
+     * recursive reference.
+     *)
+    let (_, rec_types) = TypeMap.fold (fun t _name (seen, rec_types) ->
+      Codegen.find_recursive_types ~seen ~rec_types t env
+    ) all_exports (TypeSet.empty, TypeSet.empty) in
+
+    print_endlinef "Found %d rec_types:" (TypeSet.cardinal rec_types);
+    (*
+    TypeSet.iter (fun t ->
+      print_endlinef "  %s" (Type.string_of_ctor t)
+    ) rec_types;
+    *)
+
+    (* Name all recursively referenced types *)
+    let tid = ref 0 in
+    let (env, rec_types) = TypeSet.fold Codegen.(fun t (env, rec_types) ->
+      let type_name =
+        match TypeMap.get t exported_types with
+        | Some name -> name
+        | None ->
+          let name = spf "T%d" !tid in
+          tid := !tid + 1;
+          name
+      in
+      (add_type_name t type_name env, TypeMap.add t type_name rec_types)
+    ) rec_types (env, TypeMap.empty) in
+
+    (* Codegen all recursively referenced types *)
+    let env = TypeMap.fold Codegen.(fun t type_name env ->
+      if TypeMap.get t exported_types <> None then env else
+      let env =
+        match t with
+        | Type.PolyT (tparams, _) -> Codegen.add_tparams tparams env
+        | _ -> env
+      in
+      add_str "type " env
+        |> add_str type_name
+        |> gen_tparams_list
+        |> add_str " = "
+        |> gen_named_type t
+        |> add_str ";\n"
+    ) rec_types env in
+
+    (**
+     * Codegen any classes that are referenced but not exported. We're careful
+     * to not codegen classes that are referenced but *imported* as well.
+     *)
+    let rec fold_imported_classid _name t set = Type.(
+      match Codegen.resolve_type t env with
+      | ThisClassT (InstanceT (_, _, _, {class_id; _;})) ->
+        ISet.add class_id set
+      | PolyT (_, t) -> fold_imported_classid _name t set
+      | _ -> set
+    ) in
+    let imported_classids =
+      SMap.fold fold_imported_classid imported_ts ISet.empty
+    in
+    TypeMap.fold (gen_unexported_classes imported_classids) all_exports env
+  )
+
 let gen_named_exports =
   let rec fold_named_export name t env = Codegen.(Type.(
+    let t = resolve_type t env in
     let env = (
-      match resolve_type t env with
+      match t with
       | FunT (_, _static, _prototype, {
           params_tlist;
           params_names;
@@ -357,7 +475,7 @@ let gen_named_exports =
           |> add_str name
           |> gen_tparams_list
           |> add_str " = "
-          |> gen_type t
+          |> gen_named_type t
           |> add_str ";"
 
       | t ->
@@ -393,6 +511,6 @@ let flow_file cx =
 
   Codegen.mk_env cx
     |> Codegen.add_str "// @flow\n\n"
-    |> gen_local_classes named_exports cjs_export
+    |> gen_local_types named_exports cjs_export
     |> gen_exports named_exports cjs_export
     |> Codegen.to_string

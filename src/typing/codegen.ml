@@ -8,6 +8,9 @@
  *
  *)
 
+open Utils_js
+let _ = print_endlinef
+
 (**
  * This file is a general-purpose utility for generating code. It is
  * Context.t-aware, which allows it to resolve and codegen type syntax from
@@ -27,18 +30,24 @@
 
 let spf = Printf.sprintf
 
-type codegen_env = {
+type t = {
+  applied_tparams: Type.t list;
   buf: Buffer.t;
   class_names: string IMap.t;
   mutable next_class_name: int;
   flow_cx: Context.t;
   tparams: Type.typeparam list;
-  applied_tparams: Type.t list;
+  type_names: string Type.TypeMap.t;
 }
 
 let add_applied_tparams applied_tparams env = {env with applied_tparams;}
+let add_class_name class_id name env =
+  {env with class_names = IMap.add class_id name env.class_names;}
 let add_str str env = Buffer.add_string env.buf str; env
 let add_tparams tparams env = {env with tparams;}
+let add_type_name t name env =
+  let type_names = Type.TypeMap.add t name env.type_names in
+  {env with type_names;}
 let find_props tmap_id env = Flow_js.find_props env.flow_cx tmap_id
 let has_class_name class_id env = IMap.mem class_id env.class_names
 let next_class_name env =
@@ -46,9 +55,39 @@ let next_class_name env =
   env.next_class_name <- id + 1;
   spf "Class%d" id
 let resolve_type t env = Flow_js.resolve_type env.flow_cx t
-let set_class_name class_id name env =
-  {env with class_names = IMap.add class_id name env.class_names;}
 let to_string env = Buffer.contents env.buf
+
+class recursive_type_finder = object(self)
+  inherit [Type.TypeSet.t * Type.TypeSet.t] Type_visitor.t as super
+
+  method! tvar cx (seen, rec_types) r id =
+    let t = Type.OpenT (r, id) in
+    self#type_ cx (seen, rec_types) (Flow_js.resolve_type cx t)
+
+  method! type_ cx (seen, rec_types) t = Type.(
+    let resolve_type = Flow_js.resolve_type cx in
+    let t = match t with OpenT _ -> resolve_type t | t -> t in
+    let seen_t = TypeSet.mem t seen in
+    let seen = TypeSet.add t seen in
+    match t with
+    | ObjT _ ->
+      if seen_t
+      then (seen, TypeSet.add t rec_types)
+      else super#type_ cx (seen, rec_types) t
+    | _ ->
+      if seen_t
+      then (seen, rec_types)
+      else super#type_ cx (seen, rec_types) t
+  )
+end
+let find_recursive_types =
+  let visitor = new recursive_type_finder in
+  (fun ?seen ?rec_types t env ->
+    let empty_set = Type.TypeSet.empty in
+    let seen = match seen with None -> empty_set | Some s -> s in
+    let rec_types = match rec_types with None -> empty_set | Some s -> s in
+    visitor#type_ env.flow_cx (seen, rec_types) t
+  )
 
 let mk_env merged_flow_cx = {
   applied_tparams = [];
@@ -57,6 +96,7 @@ let mk_env merged_flow_cx = {
   flow_cx = merged_flow_cx;
   next_class_name = 0;
   tparams = [];
+  type_names = Type.TypeMap.empty;
 }
 
 (**
@@ -86,8 +126,7 @@ let mk_env merged_flow_cx = {
  *     |> add_str "sixth"
  *     |> add_str "seventh"
  *)
-let gen_if conditional gen_fn env =
-  if conditional then gen_fn env else env
+let gen_if conditional gen_fn env = if conditional then gen_fn env else env
 
 (**
  * Given a type which must be a built-in class instance type, trace out the
@@ -147,10 +186,25 @@ let gen_separated_list list sep gen_fn env =
   env
 
 (* Generate type syntax for a given type *)
-let rec gen_type t env = Type.(
+let rec gen_type_rec ?print_named_type ~seen t env = Type.(
+  let t = match t with OpenT _ -> resolve_type t env | t -> t in
+  match (TypeMap.get t env.type_names, print_named_type) with
+  | (Some name, Some t_to_print) when t_to_print <> t ->
+    add_str name env |> gen_tparams_list_rec ~seen
+  | (Some name, None) ->
+    add_str name env |> gen_tparams_list_rec ~seen
+  | (Some _, Some _)
+  | (None, _) ->
+    (*
+      if TypeSet.mem t seen then failwith (
+        "Attempted to codegen a recursive type without a name!"
+      ) else
+    *)
+  let seen = TypeSet.add t seen in
   match t with
-  | AbstractT t -> add_str "$Abstract<" env |> gen_type t |> add_str ">"
-  | AnnotT (_, t) -> gen_type t env
+  | AbstractT t ->
+      add_str "$Abstract<" env |> gen_type_rec ~seen t |> add_str ">"
+  | AnnotT (_, t) -> gen_type_rec ~seen t env
   | AnyFunT _ -> add_str "Function" env
   | AnyObjT _ -> add_str "Object" env
   | AnyT _
@@ -161,13 +215,13 @@ let rec gen_type t env = Type.(
     (match ts with
     | [] ->
       add_str "Array<" env
-        |> gen_type tparam
+        |> gen_type_rec ~seen tparam
         |> add_str ">"
     | _ ->
       let t_count = List.length ts in
       let env = add_str "[" env in
       let (env, _) = List.fold_left (fun (env, idx) t ->
-        let env = gen_type t env in
+        let env = gen_type_rec ~seen t env in
         let idx = idx + 1 in
         let env =
           if idx < t_count then add_str ", " env else env
@@ -184,7 +238,7 @@ let rec gen_type t env = Type.(
   | BoundT {name; _;} -> add_str name env
   | ClassT t ->
     add_str "Class<" env
-      |> gen_type t
+      |> gen_type_rec ~seen t
       |> add_str ">"
   | CustomFunT (_, ObjectAssign) -> add_str "Object$Assign" env
   | CustomFunT (_, ObjectGetPrototypeOf) -> add_str "Object$GetPrototypeOf" env
@@ -201,21 +255,22 @@ let rec gen_type t env = Type.(
   | OpenPredT (_, _, _, _) -> add_str "mixed /* TODO: OpenPredT */" env
   | DiffT (t1, t2) ->
     add_str "$Diff<" env
-      |> gen_type t1
+      |> gen_type_rec ~seen t1
       |> add_str ", "
-      |> gen_type t2
+      |> gen_type_rec ~seen t2
       |> add_str ">"
-  | ExactT (_, t) -> add_str "$Exact<" env |> gen_type t |> add_str ">"
+  | ExactT (_, t) ->
+    add_str "$Exact<" env |> gen_type_rec ~seen t |> add_str ">"
   | FunProtoT _ -> add_str "typeof Function.prototype" env
   | FunProtoApplyT _ -> add_str "typeof Function.prototype.apply" env
   | FunProtoBindT _ -> add_str "typeof Function.prototype.bind" env
   | FunProtoCallT _ -> add_str "typeof Function.prototype.call" env
   | FunT (_, _static, _prototype, {params_tlist; params_names; return_t; _;}) ->
-    gen_tparams_list env
+    gen_tparams_list_rec ~seen env
       |> add_str "("
-      |> gen_func_params params_names params_tlist
+      |> gen_func_params_rec ~seen params_names params_tlist
       |> add_str ") => "
-      |> gen_type return_t
+      |> gen_type_rec ~seen return_t
   | InstanceT (_, _static, _super, {class_id; _;}) -> (
     (* TODO: See if we can preserve class names *)
     let env =
@@ -223,11 +278,11 @@ let rec gen_type t env = Type.(
       | Some name -> add_str name env
       | None -> gen_builtin_class_type t env
     in
-    gen_tparams_list env
+    gen_tparams_list_rec ~seen env
   )
-  | IntersectionT (_, intersection) -> gen_intersection_list intersection env
-  | KeysT (_, t) -> add_str "$Keys<" env |> gen_type t |> add_str ">"
-  | MaybeT t -> add_str "?" env |> gen_type t
+  | IntersectionT (_, intersection) -> gen_intersection_list_rec ~seen intersection env
+  | KeysT (_, t) -> add_str "$Keys<" env |> gen_type_rec ~seen t |> add_str ">"
+  | MaybeT t -> add_str "?" env |> gen_type_rec ~seen t
   | MixedT _ -> add_str "mixed" env
   | NumT (_, Literal _) ->
     (* TODO: Consider polarity and print the literal type when appropriate *)
@@ -248,7 +303,7 @@ let rec gen_type t env = Type.(
         | OptionalT t -> ("?: ", resolve_type t env)
         | t -> (": ", t)
       in
-      add_str k env |> add_str sep |> gen_type t
+      add_str k env |> add_str sep |> gen_type_rec ~seen t
     ) env in
 
     (* Generate potential dict entry *)
@@ -266,19 +321,19 @@ let rec gen_type t env = Type.(
           |> add_str "["
           |> add_str key_name
           |> add_str ": "
-          |> gen_type key
+          |> gen_type_rec ~seen key
           |> add_str "]: "
-          |> gen_type value
+          |> gen_type_rec ~seen value
       | None -> env
     in
 
     add_str "}" env
   )
-  | OptionalT t -> add_str "void | " env |> gen_type t
-  | OpenT _ -> gen_type (resolve_type t env) env
-  | PolyT (tparams, t) -> gen_type t (add_tparams tparams env)
-  | RestT rest -> gen_type rest env
-  | ShapeT t -> add_str "$Shape<" env |> gen_type t |> add_str ">"
+  | OptionalT t -> add_str "void | " env |> gen_type_rec ~seen t
+  | OpenT _ -> gen_type_rec ~seen (resolve_type t env) env
+  | PolyT (tparams, t) -> gen_type_rec ~seen t (add_tparams tparams env)
+  | RestT rest -> gen_type_rec ~seen rest env
+  | ShapeT t -> add_str "$Shape<" env |> gen_type_rec ~seen t |> add_str ">"
   | SingletonBoolT (_, v) -> add_str (spf "%b" v) env
   | SingletonNumT (_, (_, v)) -> add_str (spf "%s" v) env
   | SingletonStrT (_, v) -> add_str (spf "%S" v) env
@@ -286,11 +341,11 @@ let rec gen_type t env = Type.(
     (* TODO: Consider polarity and print the literal type when appropriate *)
     add_str "string" env
   | StrT (_, (Truthy|AnyLiteral)) -> add_str "string" env
-  | ThisClassT t -> gen_type t env
-  | ThisTypeAppT (t, _, ts) -> add_applied_tparams ts env |> gen_type t
-  | TypeAppT (t, ts) -> add_applied_tparams ts env |> gen_type t
-  | TypeT (_, t) -> gen_type t env
-  | UnionT (_, union) -> gen_union_list union env
+  | ThisClassT t -> gen_type_rec ~seen t env
+  | ThisTypeAppT (t, _, ts) -> add_applied_tparams ts env |> gen_type_rec ~seen t
+  | TypeAppT (t, ts) -> add_applied_tparams ts env |> gen_type_rec ~seen t
+  | TypeT (_, t) -> gen_type_rec ~seen t env
+  | UnionT (_, union) -> gen_union_list_rec ~seen union env
   | VoidT _ -> add_str "void" env
 
   (**
@@ -313,7 +368,7 @@ let rec gen_type t env = Type.(
     -> add_str (spf "mixed /* UNEXPECTED TYPE: %s */" (string_of_ctor t)) env
 )
 
-and gen_func_params params_names params_tlist env =
+and gen_func_params_rec ~seen params_names params_tlist env =
   let params =
     match params_names with
     | Some params_names ->
@@ -329,24 +384,24 @@ and gen_func_params params_names params_tlist env =
       add_str "..." env
       |> add_str name
       |> add_str ": Array<"
-      |> gen_type t
+      |> gen_type_rec ~seen t
       |> add_str ">"
     | OptionalT t ->
       add_str name env
       |> add_str "?: "
-      |> gen_type t
+      |> gen_type_rec ~seen t
     | t ->
       add_str name env
       |> add_str ": "
-      |> gen_type t
+      |> gen_type_rec ~seen t
   ) env
 
-and gen_intersection_list intersection env =
+and gen_intersection_list_rec ~seen intersection env =
   let members = Type.InterRep.members intersection in
-  gen_separated_list members " & " gen_type env
+  gen_separated_list members " & " (gen_type_rec ~seen) env
 
-and gen_tparams_list = Type.(
-  let gen_tparam {reason = _; name; bound; polarity; default;} env =
+and gen_tparams_list_rec = Type.(
+  let gen_tparam ~seen {reason = _; name; bound; polarity; default;} env =
     let bound = resolve_type bound env in
     let env = (
       match polarity with
@@ -358,17 +413,17 @@ and gen_tparams_list = Type.(
     let env = (
       match bound with
       | MixedT _ -> env
-      | bound -> add_str ": " env |> gen_type bound
+      | bound -> add_str ": " env |> gen_type_rec ~seen bound
     ) in
     let env = (
       match default with
-      | Some default -> add_str " = " env |> gen_type default
+      | Some default -> add_str " = " env |> gen_type_rec ~seen default
       | None -> env
     ) in
     env
   in
 
-  fun env ->
+  fun ~seen env ->
     let tparams = env.tparams in
     let params_count = List.length tparams in
     let applied_tparams = env.applied_tparams in
@@ -378,15 +433,23 @@ and gen_tparams_list = Type.(
     | (_, 0) ->
       {env with tparams = []; }
         |> add_str "<"
-        |> gen_separated_list tparams ", " gen_tparam
+        |> gen_separated_list tparams ", " (gen_tparam ~seen)
         |> add_str ">"
     | _ ->
       {env with tparams = []; applied_tparams = []; }
         |> add_str "<"
-        |> gen_separated_list applied_tparams ", " gen_type
+        |> gen_separated_list applied_tparams ", " (gen_type_rec ~seen)
         |> add_str ">"
 )
 
-and gen_union_list union env =
+and gen_union_list_rec ~seen union env =
   let members = Type.UnionRep.members union in
-  gen_separated_list members " | " gen_type env
+  gen_separated_list members " | " (gen_type_rec ~seen) env
+
+let empty_seen = Type.TypeSet.empty
+let gen_named_type t = gen_type_rec ~seen:empty_seen ~print_named_type:t t
+let gen_type t = gen_type_rec ~seen:empty_seen t
+let gen_func_params p = gen_func_params_rec ~seen:empty_seen p
+let gen_intersection_list i = gen_intersection_list_rec ~seen:empty_seen i
+let gen_tparams_list env = gen_tparams_list_rec ~seen:empty_seen env
+let gen_union_list u = gen_union_list_rec u ~seen:empty_seen
